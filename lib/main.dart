@@ -1,12 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:web_socket_channel/io.dart';
 
 void main() {
   runApp(const MyApp());
@@ -126,8 +127,8 @@ class _AudioListPageState extends State<AudioListPage> {
                     ],
                   ),
                   child: ListTile(
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
                     title: Text(
                       "Recording ${index + 1}",
                       style: const TextStyle(
@@ -181,7 +182,7 @@ class _AudioListPageState extends State<AudioListPage> {
 }
 
 /// -------------------------------
-/// PAGE 2: RECORDING + TRANSCRIBE
+/// PAGE 2: LIVE RECORDING + TRANSCRIBE
 /// -------------------------------
 class SpeakToTextPage extends StatefulWidget {
   const SpeakToTextPage({super.key});
@@ -193,47 +194,9 @@ class SpeakToTextPage extends StatefulWidget {
 class _SpeakToTextPageState extends State<SpeakToTextPage> {
   FlutterSoundRecorder? _recorder;
   bool isRecording = false;
-  String? _filePath;
   String _transcription = "";
   bool _isLoading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initRecorder();
-  }
-
-  Future<void> _initRecorder() async {
-    _recorder = FlutterSoundRecorder();
-    final status = await Permission.microphone.request();
-    if (status != PermissionStatus.granted) {
-      throw Exception('Microphone permission not granted');
-    }
-    await _recorder!.openRecorder();
-  }
-
-  Future<void> _startRecording() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final fileName = 'recording_${DateTime.now().millisecondsSinceEpoch}.m4a';
-    _filePath = '${dir.path}/$fileName';
-
-    await _recorder!.startRecorder(toFile: _filePath, codec: Codec.aacMP4);
-
-    setState(() {
-      isRecording = true;
-      _transcription = "";
-    });
-  }
-
-  Future<void> _stopRecording() async {
-    await _recorder!.stopRecorder();
-    setState(() {
-      isRecording = false;
-    });
-    if (_filePath != null) {
-      await _sendToAssemblyAI(_filePath!);
-    }
-  }
+  IOWebSocketChannel? _channel;
 
   Future<void> _saveRecording(String path, String text) async {
     final prefs = await SharedPreferences.getInstance();
@@ -246,80 +209,79 @@ class _SpeakToTextPageState extends State<SpeakToTextPage> {
     await prefs.setString('audio_list', jsonEncode(list));
   }
 
-  Future<void> _sendToAssemblyAI(String path) async {
+  Future<void> _startRecording() async {
+    final status = await Permission.microphone.request();
+    if (status != PermissionStatus.granted) {
+      throw Exception('Microphone permission not granted');
+    }
+
+    const String apiKey = 'bc5bee7b4bff42e1a7b87ed6501ed3d5';
+    const String realtimeUrl =
+        'wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000';
+
     setState(() {
+      isRecording = true;
+      _transcription = "";
+    });
+
+    // Connect to AssemblyAI Realtime API
+    _channel = IOWebSocketChannel.connect(
+      Uri.parse(realtimeUrl),
+      headers: {'Authorization': apiKey},
+    );
+
+    // Listen to live transcription events
+    _channel!.stream.listen((event) {
+      final data = jsonDecode(event);
+      if (data['text'] != null) {
+        setState(() {
+          _transcription = data['text'];
+        });
+      }
+    });
+
+    // Start recorder and stream data live
+    _recorder = FlutterSoundRecorder();
+    await _recorder!.openRecorder();
+
+    await _recorder!.startRecorder(
+      codec: Codec.pcm16,
+      numChannels: 1,
+      sampleRate: 16000,
+      toStream: (Uint8List buffer) async {
+        if (_channel != null) {
+          _channel!.sink.add(base64Encode(buffer));
+        }
+      },
+    );
+  }
+
+  Future<void> _stopRecording() async {
+    setState(() {
+      isRecording = false;
       _isLoading = true;
     });
 
-    const String apiKey = 'bc5bee7b4bff42e1a7b87ed6501ed3d5';
+    await _recorder?.stopRecorder();
+    await _recorder?.closeRecorder();
 
-    try {
-      final file = File(path);
-      final uri = Uri.parse('https://api.assemblyai.com/v2/upload');
-      final request = http.Request("POST", uri);
-      request.headers['authorization'] = apiKey;
-      request.bodyBytes = await file.readAsBytes();
-      final uploadResponse = await request.send();
-      final uploadResponseBody = await uploadResponse.stream.bytesToString();
+    _channel?.sink.add(jsonEncode({'terminate_session': true}));
+    await _channel?.sink.close();
 
-      if (uploadResponse.statusCode != 200) {
-        throw Exception('Upload failed: $uploadResponseBody');
-      }
+    final dir = await getApplicationDocumentsDirectory();
+    final filePath =
+        '${dir.path}/live_recording_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    await _saveRecording(filePath, _transcription);
 
-      final uploadUrl = jsonDecode(uploadResponseBody)['upload_url'];
-
-      final transcriptionRequest = await http.post(
-        Uri.parse('https://api.assemblyai.com/v2/transcript'),
-        headers: {
-          'authorization': apiKey,
-          'content-type': 'application/json',
-        },
-        body: jsonEncode({'audio_url': uploadUrl}),
-      );
-
-      if (transcriptionRequest.statusCode != 200) {
-        throw Exception('Transcription request failed: ${transcriptionRequest.body}');
-      }
-
-      final transcriptId = jsonDecode(transcriptionRequest.body)['id'];
-
-      String status = '';
-      String text = '';
-      while (status != 'completed') {
-        await Future.delayed(const Duration(seconds: 3));
-        final pollingResponse = await http.get(
-          Uri.parse('https://api.assemblyai.com/v2/transcript/$transcriptId'),
-          headers: {'authorization': apiKey},
-        );
-
-        final body = jsonDecode(pollingResponse.body);
-        status = body['status'];
-        if (status == 'completed') {
-          text = body['text'];
-          break;
-        } else if (status == 'error') {
-          throw Exception('Transcription error: ${body['error']}');
-        }
-      }
-
-      await _saveRecording(path, text);
-
-      setState(() {
-        _transcription = text;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _transcription = "Failed to transcribe. Try again.\nError: $e";
-        _isLoading = false;
-      });
-    }
+    setState(() {
+      _isLoading = false;
+    });
   }
 
   @override
   void dispose() {
     _recorder?.closeRecorder();
-    _recorder = null;
+    _channel?.sink.close();
     super.dispose();
   }
 
@@ -330,7 +292,7 @@ class _SpeakToTextPageState extends State<SpeakToTextPage> {
       appBar: AppBar(
         backgroundColor: Colors.indigoAccent,
         title: const Text(
-          "New Recording",
+          "Live Transcription",
           style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         centerTitle: true,
@@ -378,7 +340,9 @@ class _SpeakToTextPageState extends State<SpeakToTextPage> {
                             color: Colors.white,
                           ),
                           onPressed: () {
-                            isRecording ? _stopRecording() : _startRecording();
+                            isRecording
+                                ? _stopRecording()
+                                : _startRecording();
                           },
                         ),
                       ],
@@ -387,7 +351,7 @@ class _SpeakToTextPageState extends State<SpeakToTextPage> {
                   const SizedBox(height: 20),
                   Text(
                     isRecording
-                        ? "Listening..."
+                        ? "Listening... (Live Transcription)"
                         : "Tap the mic to start recording",
                     style: const TextStyle(
                       fontSize: 16,
@@ -405,7 +369,7 @@ class _SpeakToTextPageState extends State<SpeakToTextPage> {
                             ),
                             const SizedBox(height: 12),
                             const Text(
-                              "Processing audio...",
+                              "Saving recording...",
                               style: TextStyle(color: Colors.black54),
                             ),
                           ],
@@ -425,7 +389,7 @@ class _SpeakToTextPageState extends State<SpeakToTextPage> {
                           ),
                           child: Text(
                             _transcription.isEmpty
-                                ? "Your text will appear here..."
+                                ? "Your live text will appear here..."
                                 : _transcription,
                             textAlign: TextAlign.center,
                             style: const TextStyle(
