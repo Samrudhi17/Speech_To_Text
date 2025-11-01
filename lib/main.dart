@@ -1,410 +1,346 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter_sound/flutter_sound.dart';
-import 'package:loading_animation_widget/loading_animation_widget.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:uuid/uuid.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:web_socket_channel/io.dart';
+import 'package:sound_stream/sound_stream.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: "Speech to Text App",
+      title: 'Live Transcription App',
+      theme: ThemeData(primarySwatch: Colors.blue),
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigoAccent),
-        scaffoldBackgroundColor: const Color(0xFFF5F7FA),
-        textTheme: const TextTheme(
-          bodyMedium: TextStyle(fontFamily: 'Roboto'),
-        ),
-      ),
-      home: const AudioListPage(),
+      home: HomePage(),
     );
   }
 }
 
-/// -------------------------------
-/// PAGE 1: AUDIO LIST PAGE
-/// -------------------------------
-class AudioListPage extends StatefulWidget {
-  const AudioListPage({super.key});
-
+// --------------------------------------------------
+// 1️⃣ HOME PAGE
+// --------------------------------------------------
+class HomePage extends StatefulWidget {
   @override
-  State<AudioListPage> createState() => _AudioListPageState();
+  _HomePageState createState() => _HomePageState();
 }
 
-class _AudioListPageState extends State<AudioListPage> {
-  List<Map<String, dynamic>> _audioList = [];
-  FlutterSoundPlayer? _player;
+class _HomePageState extends State<HomePage> {
+  List<Map<String, dynamic>> _records = [];
+  final AudioPlayer _player = AudioPlayer();
 
   @override
   void initState() {
     super.initState();
-    _loadAudioList();
-    _player = FlutterSoundPlayer();
-    _player!.openPlayer();
+    _loadMetadata();
   }
 
-  Future<void> _loadAudioList() async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = prefs.getString('audio_list');
-    if (data != null) {
+  Future<void> _loadMetadata() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final metadataFile = File("${dir.path}/metadata.json");
+    if (metadataFile.existsSync()) {
+      final data = jsonDecode(metadataFile.readAsStringSync());
       setState(() {
-        _audioList = List<Map<String, dynamic>>.from(jsonDecode(data));
+        _records = List<Map<String, dynamic>>.from(data);
       });
+      print("📂 Loaded metadata with ${_records.length} records.");
+    } else {
+      print("ℹ️ No metadata.json file found. Creating new one...");
+      metadataFile.writeAsStringSync(jsonEncode([]));
     }
   }
 
-  Future<void> _playAudio(String filePath) async {
-    await _player!.startPlayer(fromURI: filePath);
+  Future<void> _saveMetadata() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final metadataFile = File("${dir.path}/metadata.json");
+    metadataFile.writeAsStringSync(jsonEncode(_records));
+    print("💾 Metadata saved (${_records.length} records).");
   }
 
-  Future<void> _stopAudio() async {
-    await _player!.stopPlayer();
+  Future<void> _deleteRecording(int index) async {
+    final record = _records[index];
+    final path = record["path"];
+    final file = File(path);
+
+    if (await file.exists()) {
+      await file.delete();
+      print("🗑️ Deleted file: $path");
+    }
+
+    setState(() {
+      _records.removeAt(index);
+    });
+    await _saveMetadata();
   }
 
-  @override
-  void dispose() {
-    _player?.closePlayer();
-    super.dispose();
+  void _playRecording(String path) async {
+    try {
+      print("▶️ Playing audio file: $path");
+      await _player.play(DeviceFileSource(path));
+    } catch (e) {
+      print("❌ Error playing audio: $e");
+    }
+  }
+
+  void _goToRecordPage() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => RecordPage()),
+    );
+    _loadMetadata();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Colors.indigoAccent,
-        elevation: 4,
-        title: const Text(
-          "My Recordings",
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w700,
-            fontSize: 20,
-          ),
-        ),
-        centerTitle: true,
-      ),
-      body: _audioList.isEmpty
-          ? const Center(
-              child: Text(
-                "No recordings yet.\nTap '+' to record new audio.",
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 16,
-                  color: Colors.black54,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            )
+      appBar: AppBar(title: Text('Recordings')),
+      body: _records.isEmpty
+          ? Center(child: Text("No recordings yet"))
           : ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: _audioList.length,
+              itemCount: _records.length,
               itemBuilder: (context, index) {
-                final item = _audioList[index];
-                return Container(
-                  margin: const EdgeInsets.symmetric(vertical: 8),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(16),
-                    color: Colors.white,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black12.withOpacity(0.1),
-                        blurRadius: 6,
-                        offset: const Offset(2, 4),
-                      ),
-                    ],
-                  ),
+                final record = _records[index];
+                return Card(
+                  margin: EdgeInsets.all(8),
                   child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    title: Text(
-                      "Recording ${index + 1}",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 17,
-                        color: Colors.indigoAccent,
-                      ),
+                    leading: IconButton(
+                      icon: Icon(Icons.play_arrow),
+                      onPressed: () => _playRecording(record["path"]),
                     ),
-                    subtitle: Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        item['text'] ?? 'No transcription available',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          color: Colors.black87,
-                        ),
-                      ),
-                    ),
-                    trailing: CircleAvatar(
-                      radius: 22,
-                      backgroundColor: Colors.indigoAccent.withOpacity(0.15),
-                      child: IconButton(
-                        icon: const Icon(Icons.play_circle_fill,
-                            color: Colors.indigoAccent, size: 30),
-                        onPressed: () => _playAudio(item['path']),
-                      ),
+                    title: Text(record["transcription"] ?? "No text"),
+                    trailing: IconButton(
+                      icon: Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => _deleteRecording(index),
                     ),
                   ),
                 );
               },
             ),
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: Colors.indigoAccent,
-        onPressed: () async {
-          await Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const SpeakToTextPage()),
-          );
-          _loadAudioList();
-        },
-        icon: const Icon(Icons.mic, color: Colors.white),
-        label: const Text(
-          "Record",
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-        ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _goToRecordPage,
+        child: Icon(Icons.add),
       ),
     );
   }
 }
 
-/// -------------------------------
-/// PAGE 2: LIVE RECORDING + TRANSCRIBE
-/// -------------------------------
-class SpeakToTextPage extends StatefulWidget {
-  const SpeakToTextPage({super.key});
-
+// --------------------------------------------------
+// 2️⃣ RECORD PAGE (Realtime transcription)
+// --------------------------------------------------
+class RecordPage extends StatefulWidget {
   @override
-  State<SpeakToTextPage> createState() => _SpeakToTextPageState();
+  _RecordPageState createState() => _RecordPageState();
 }
 
-class _SpeakToTextPageState extends State<SpeakToTextPage> {
-  FlutterSoundRecorder? _recorder;
-  bool isRecording = false;
-  String _transcription = "";
-  bool _isLoading = false;
-  IOWebSocketChannel? _channel;
+class _RecordPageState extends State<RecordPage> {
+  final RecorderStream _recorder = RecorderStream();
+  final AssemblyAIRealtime _assemblyAI = AssemblyAIRealtime();
+  final String apiKey = "bc5bee7b4bff42e1a7b87ed6501ed3d5";
 
-  Future<void> _saveRecording(String path, String text) async {
-    final prefs = await SharedPreferences.getInstance();
-    final data = prefs.getString('audio_list');
-    List<Map<String, dynamic>> list = [];
-    if (data != null) {
-      list = List<Map<String, dynamic>>.from(jsonDecode(data));
-    }
-    list.add({'path': path, 'text': text});
-    await prefs.setString('audio_list', jsonEncode(list));
+  bool _isRecording = false;
+  String _transcription = "";
+  List<List<int>> _audioChunks = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _setupPermissions();
+  }
+
+  Future<void> _setupPermissions() async {
+    await Permission.microphone.request();
   }
 
   Future<void> _startRecording() async {
-    final status = await Permission.microphone.request();
-    if (status != PermissionStatus.granted) {
-      throw Exception('Microphone permission not granted');
-    }
+    print("🎙️ Starting recording...");
+    await _assemblyAI.connect(apiKey);
 
-    const String apiKey = 'bc5bee7b4bff42e1a7b87ed6501ed3d5';
-    const String realtimeUrl =
-        'wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000';
+    _recorder.initialize();
+    _recorder.start();
+    _isRecording = true;
 
-    setState(() {
-      isRecording = true;
-      _transcription = "";
+    _recorder.audioStream.listen((data) {
+      _assemblyAI.sendAudioChunk(data);
+      _audioChunks.add(data);
     });
 
-    // Connect to AssemblyAI Realtime API
-    _channel = IOWebSocketChannel.connect(
-      Uri.parse(realtimeUrl),
-      headers: {'Authorization': apiKey},
-    );
+    _assemblyAI.onTextUpdate = (text) {
+      setState(() {
+        _transcription = text;
+      });
+    };
 
-    // Listen to live transcription events
-    _channel!.stream.listen((event) {
-      final data = jsonDecode(event);
-      if (data['text'] != null) {
-        setState(() {
-          _transcription = data['text'];
-        });
-      }
-    });
-
-    // Start recorder and stream data live
-    _recorder = FlutterSoundRecorder();
-    await _recorder!.openRecorder();
-
-    await _recorder!.startRecorder(
-      codec: Codec.pcm16,
-      numChannels: 1,
-      sampleRate: 16000,
-      toStream: (Uint8List buffer) async {
-        if (_channel != null) {
-          _channel!.sink.add(base64Encode(buffer));
-        }
-      },
-    );
+    _assemblyAI.onError = (err) {
+      print("❌ AssemblyAI Error: $err");
+      setState(() {
+        _transcription = "Error: $err";
+      });
+    };
   }
 
   Future<void> _stopRecording() async {
-    setState(() {
-      isRecording = false;
-      _isLoading = true;
-    });
+    print("🛑 Stopping recording...");
+    await _recorder.stop();
+    _isRecording = false;
+    _assemblyAI.close();
+    await _saveRecording();
+  }
 
-    await _recorder?.stopRecorder();
-    await _recorder?.closeRecorder();
-
-    _channel?.sink.add(jsonEncode({'terminate_session': true}));
-    await _channel?.sink.close();
-
+  Future<void> _saveRecording() async {
     final dir = await getApplicationDocumentsDirectory();
-    final filePath =
-        '${dir.path}/live_recording_${DateTime.now().millisecondsSinceEpoch}.m4a';
-    await _saveRecording(filePath, _transcription);
+    final id = Uuid().v4();
+    final filePath = "${dir.path}/$id.wav";
 
-    setState(() {
-      _isLoading = false;
+    final file = File(filePath);
+    await file.writeAsBytes(_audioChunks.expand((e) => e).toList());
+
+    final metadataFile = File("${dir.path}/metadata.json");
+    List<Map<String, dynamic>> metadata = [];
+
+    if (metadataFile.existsSync()) {
+      metadata = List<Map<String, dynamic>>.from(
+          jsonDecode(metadataFile.readAsStringSync()));
+    }
+
+    metadata.add({
+      "id": id,
+      "path": filePath,
+      "transcription": _transcription,
     });
+
+    metadataFile.writeAsStringSync(jsonEncode(metadata));
+    print("💾 Saved new recording to $filePath");
   }
 
   @override
   void dispose() {
-    _recorder?.closeRecorder();
-    _channel?.sink.close();
+    _assemblyAI.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
       appBar: AppBar(
-        backgroundColor: Colors.indigoAccent,
-        title: const Text(
-          "Live Transcription",
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        title: Text("Live Transcription"),
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back),
+          onPressed: () {
+            _assemblyAI.close();
+            Navigator.pop(context);
+          },
         ),
-        centerTitle: true,
       ),
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            physics: const NeverScrollableScrollPhysics(),
-            child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    height: 150,
-                    width: 150,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 300),
-                          height: isRecording ? 150 : 120,
-                          width: isRecording ? 150 : 120,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            boxShadow: [
-                              if (isRecording)
-                                BoxShadow(
-                                  color: Colors.redAccent.withOpacity(0.5),
-                                  blurRadius: 25,
-                                  spreadRadius: 10,
-                                ),
-                            ],
-                            gradient: LinearGradient(
-                              colors: isRecording
-                                  ? [Colors.redAccent, Colors.deepOrangeAccent]
-                                  : [Colors.indigoAccent, Colors.blueAccent],
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          iconSize: 60,
-                          icon: Icon(
-                            isRecording ? Icons.mic : Icons.mic_none_outlined,
-                            color: Colors.white,
-                          ),
-                          onPressed: () {
-                            isRecording
-                                ? _stopRecording()
-                                : _startRecording();
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    isRecording
-                        ? "Listening... (Live Transcription)"
-                        : "Tap the mic to start recording",
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.black54,
-                    ),
-                  ),
-                  const SizedBox(height: 40),
-                  _isLoading
-                      ? Column(
-                          children: [
-                            LoadingAnimationWidget.waveDots(
-                              color: Colors.indigoAccent,
-                              size: 60,
-                            ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              "Saving recording...",
-                              style: TextStyle(color: Colors.black54),
-                            ),
-                          ],
-                        )
-                      : Container(
-                          padding: const EdgeInsets.all(20),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(16),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: Colors.black12,
-                                blurRadius: 8,
-                                offset: Offset(2, 4),
-                              ),
-                            ],
-                          ),
-                          child: Text(
-                            _transcription.isEmpty
-                                ? "Your live text will appear here..."
-                                : _transcription,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              color: Colors.black87,
-                              height: 1.4,
-                            ),
-                          ),
-                        ),
-                ],
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                child: Text(
+                  _transcription,
+                  style: TextStyle(fontSize: 18),
+                ),
               ),
             ),
-          ),
+            SizedBox(height: 20),
+            FloatingActionButton(
+              backgroundColor: _isRecording ? Colors.red : Colors.green,
+              child: Icon(_isRecording ? Icons.stop : Icons.mic),
+              onPressed: _isRecording ? _stopRecording : _startRecording,
+            ),
+          ],
         ),
       ),
     );
+  }
+}
+
+// --------------------------------------------------
+// 🔧 AssemblyAI Realtime Connection
+// --------------------------------------------------
+class AssemblyAIRealtime {
+  WebSocketChannel? _channel;
+  Function(String text)? onTextUpdate;
+  Function(String error)? onError;
+
+  Future<void> connect(String apiKey) async {
+    final uri = Uri.parse("wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000");
+
+    try {
+      print("🔗 Connecting to AssemblyAI WebSocket...");
+      _channel = WebSocketChannel.connect(uri);
+      print("✅ Connected! Sending auth...");
+
+      _channel!.sink.add(jsonEncode({
+        "auth": apiKey,
+        "config": {
+          "sample_rate": 16000,
+          "encoding": "pcm_s16le"
+        }
+      }));
+
+      _channel!.stream.listen(
+        (message) {
+          print("📥 Received: $message");
+          final data = jsonDecode(message);
+
+          if (data.containsKey('error')) {
+            print("❌ Error: ${data['error']}");
+            onError?.call(data['error']);
+          } else if (data.containsKey('text')) {
+            onTextUpdate?.call(data['text']);
+          } else {
+            print("⚙️ Other message: $data");
+          }
+        },
+        onError: (err) {
+          print("🚨 WebSocket error: $err");
+          onError?.call(err.toString());
+        },
+        onDone: () {
+          print("🔚 WebSocket closed");
+        },
+        cancelOnError: true,
+      );
+    } catch (e, st) {
+      print("💥 Failed to connect: $e");
+      print("🧩 StackTrace: $st");
+      onError?.call(e.toString());
+    }
+  }
+
+  void sendAudioChunk(List<int> chunk) {
+    try {
+      if (_channel != null) {
+        print("🎧 Sending ${chunk.length} bytes...");
+        _channel!.sink.add(jsonEncode({
+          "audio_data": base64Encode(chunk),
+        }));
+      } else {
+        print("⚠️ WebSocket not connected");
+      }
+    } catch (e) {
+      print("🚨 Error sending chunk: $e");
+      onError?.call(e.toString());
+    }
+  }
+
+  void close() {
+    try {
+      print("🛑 Closing WebSocket...");
+      _channel?.sink.close();
+    } catch (e) {
+      print("⚠️ Error closing: $e");
+    }
   }
 }
