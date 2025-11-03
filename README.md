@@ -1,16 +1,56 @@
-# speech_to_text_app
+# Speech To Text App
 
-A new Flutter project.
+This is my Flutter project which converts speech into text using the AssemblyAI API.
+The app allows recording audio, sending it to API, and showing the transcribed text.
+All recordings and text are saved locally in the phone.
 
-## Getting Started
+# Features
 
-This project is a starting point for a Flutter application.
+Record your voice
 
-A few resources to get you started if this is your first Flutter project:
+Convert audio to text
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+Save recordings with text
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Play previous recordings
+
+Simple and clean UI
+
+
+# Tools Used
+
+Flutter
+
+Dart
+
+AssemblyAI API
+
+Shared Preferences
+
+Path Provider
+
+Permission Handler
+
+Flutter Sound
+
+HTTP package
+
+# How It Works
+
+Tap the mic button to start recording
+
+Stop recording when done
+
+The app sends the audio to AssemblyAI
+
+Transcribed text appears on screen
+
+Audio and text are stored locally
+
+# Dependencies
+flutter_sound: ^9.2.13
+loading_animation_widget: ^1.2.0
+path_provider: ^2.1.2
+http: ^1.1.0
+permission_handler: ^11.0.0
+shared_preferences: ^2.2.3
